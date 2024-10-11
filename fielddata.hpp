@@ -2018,7 +2018,7 @@ void FieldData::deconvolve (){
 	double window_z[nz];
 	for(int i=0;i<nx;i++){
 		int ii = (i>nx/2)?i-nx:i;
-		window_x[i] = pow(1.0/gsl_sf_sinc(ii/((double)ny)),this->get_window_order());
+		window_x[i] = pow(1.0/gsl_sf_sinc(ii/((double)nx)),this->get_window_order());
     }
 	for(int i=0;i<ny;i++){
 		int ii = (i>ny/2)?i-ny:i;
@@ -2029,16 +2029,17 @@ void FieldData::deconvolve (){
 		window_z[i] = pow(1.0/gsl_sf_sinc(ii/((double)nz)),this->get_window_order());
     }
 #pragma omp parallel for schedule(guided)
-        for(int i=0;i<nx;i++){
+        for(long long int i=0;i<nx;i++){
                 float wx = window_x[i];
-                for(int j=0;j<ny;j++){
+                for(long long int j=0;j<ny;j++){
                         float wy = window_y[j];
-                        for(int k=0;k<nz/2;k++){
+                        for(long long int k=0;k<nz/2;k++){
                                 float wz = window_z[k];
-                                int bin = (i*ny+j)*(2*(nz/2+1))+2*k;
+								long long int bin = (i*(long long int)ny+j)*(2*((long long int)nz/2+1))+2*k;
                                 this->data[bin] *= wx*wy*wz;
                                 this->data[bin+1] *= wx*wy*wz;
                         }
                 }
         }
+	std::cout << "Deconvolution done." << std::endl;
 }
