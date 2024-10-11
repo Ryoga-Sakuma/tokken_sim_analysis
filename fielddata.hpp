@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cassert>
 #include <fftw3.h>
 #include <omp.h>
 #include <gsl/gsl_sf_trig.h>
@@ -25,6 +26,7 @@ private:
 	size_t nx, ny, nz;
 	float Lx, Ly, Lz;
 	int ngal;
+	int window_order;
 	std::vector<float> data;
 	fftwf_plan forward_plan, backward_plan;
 	// static fftwf_plan forward_plan, backward_plan;
@@ -48,6 +50,8 @@ private:
 	~FieldData() {if(forward_plan!=NULL) fftwf_destroy_plan(forward_plan); if(backward_plan!=NULL) fftwf_destroy_plan(backward_plan);}
 	void fill_data(float);
 	void change_space(bool a) {inFourierSpace = a;}
+	void put_window_order(int a) { window_order=a; }
+	int get_window_order(void) { return window_order; }
 	void do_fft();
 	void do_ifft();
 	void put_ngal(int a) {ngal = a;}
@@ -102,6 +106,7 @@ private:
 	static BinnedData calc_correlation(FieldData &,int,float,float,bool);
 	// static void delete_plans(void){if(forward_plan!=NULL) fftwf_destroy_plan(forward_plan); if(backward_plan!=NULL) fftwf_destroy_plan(backward_plan);}
 	void zero_pad(int,int,int,int,float);
+	void deconvolve(void);
 	// copy constructor
 	FieldData(const FieldData& a){
 		nx = a.get_nx();
@@ -326,9 +331,11 @@ void FieldData::assignment(std::vector<myhosthalo_str> &D,double nh,bool CIC,boo
 	if(CIC){
 		std::cerr << "start CIC density assignment of " << ntake << " points to ("
 		<< nx << "," << ny << "," << nz << ") grid points" << std::endl;
+		window_order = 2;
 	}else{
 		std::cerr << "start NGP density assignment of " << ntake << " points to ("
 		<< nx << "," << ny << "," << nz << ") grid points" << std::endl;
+		window_order = 1;
 	}
 	double P_tot(0);
 
@@ -417,9 +424,11 @@ void FieldData::assignment_nonorm(std::vector<myhosthalo_str> &D,double nh,bool 
 	if(CIC){
 		std::cerr << "start CIC density assignment of " << ntake << " points to ("
 		<< nx << "," << ny << "," << nz << ") grid points" << std::endl;
+		window_order = 2;
 	}else{
 		std::cerr << "start NGP density assignment of " << ntake << " points to ("
 		<< nx << "," << ny << "," << nz << ") grid points" << std::endl;
+		window_order = 1;
 	}
 	double P_tot(0);
 
@@ -508,9 +517,11 @@ void FieldData::assignment_nonorm(std::vector<myhosthalo_str> &D,double nh_min,d
 	if(CIC){
 		std::cerr << "start CIC density assignment of " << ntake_max-ntake_min << " points to a ("
 		<< nx << "," << ny << "," << nz << ") grid points" << std::endl;
+		window_order = 2;
 	}else{
 		std::cerr << "start NGP density assignment of " << ntake_max-ntake_min << " points to a ("
 		<< nx << "," << ny << "," << nz << ") grid points" << std::endl;
+		window_order = 1;
 	}
 	double P_tot(0);
 
@@ -596,9 +607,11 @@ void FieldData::assignment(std::vector<myhosthalo_str> &D,bool CIC,bool interlac
 	if(CIC){
 		std::cerr << "start CIC density assignment of " << D.size() << " points to a ("
 		<< nx << "," << ny << "," << nz << ") grid points" << std::endl;
+		window_order = 2;
 	}else{
 		std::cerr << "start NGP density assignment of " << D.size() << " points to a ("
 		<< nx << "," << ny << "," << nz << ") grid points" << std::endl;
+		window_order = 1;
 	}
 	double P_tot(0);
 
@@ -679,14 +692,17 @@ void FieldData::assignment(std::vector<myhosthalo_str> &D,bool CIC,bool interlac
 	ngal = P_tot;
 }
 
+#ifdef ZSPCE 
 void FieldData::assignment(std::vector<myhosthalo_str> &D,bool CIC,bool interlace, double sfac, int los_dir){ // dir: line-of-sight direction (0: x, 1: y, 2: z)
 
 	if(CIC){
 		std::cerr << "start CIC density assignment of " << D.size() << " points to a ("
 		<< nx << "," << ny << "," << nz << ") grid points in redshift space" << std::endl;
+		window_order = 2;
 	}else{
 		std::cerr << "start NGP density assignment of " << D.size() << " points to a ("
 		<< nx << "," << ny << "," << nz << ") grid points in redshift space" << std::endl;
+		window_order = 1;
 	}
 	double P_tot(0);
 
@@ -790,7 +806,7 @@ void FieldData::assignment(std::vector<myhosthalo_str> &D,bool CIC,bool interlac
 	std::cerr << " done." << std::endl;
 	ngal = P_tot;
 }
-
+#endif
 
 
 void FieldData::average2fields (FieldData &f1, FieldData &f2){
@@ -828,6 +844,7 @@ void FieldData::adjust_grid(void){
 }
 
 void FieldData::apply_filter(float R, std::string filter_type){
+	assert(inFourierSpace);
 	float kfundx = 2.*M_PI/Lx;
 	float kfundy = 2.*M_PI/Ly;
 	float kfundz = 2.*M_PI/Lz;
@@ -1987,6 +2004,41 @@ void FieldData::zero_pad(int nsub, int i, int j, int k, float val=0){
 
 }
 
-// bool FieldData::fft_init = false;
-// fftwf_plan FieldData::forward_plan;
-// fftwf_plan FieldData::backward_plan;
+void FieldData::deconvolve (){
+
+	assert(inFourierSpace);
+
+	std::cout << "Deconvolve the mass assignment window ..." << std::endl;
+	if(this->get_window_order()==1) std::cout << "(NGP scheme was employed.)" << std::endl;
+	else if(this->get_window_order()==2) std::cout << "(CIC scheme was employed.)" << std::endl;
+
+
+	double window_x[nx];
+	double window_y[ny];
+	double window_z[nz];
+	for(int i=0;i<nx;i++){
+		int ii = (i>nx/2)?i-nx:i;
+		window_x[i] = pow(1.0/gsl_sf_sinc(ii/((double)ny)),this->get_window_order());
+    }
+	for(int i=0;i<ny;i++){
+		int ii = (i>ny/2)?i-ny:i;
+		window_y[i] = pow(1.0/gsl_sf_sinc(ii/((double)ny)),this->get_window_order());
+    }
+	for(int i=0;i<nz;i++){
+		int ii = (i>nz/2)?i-nz:i;
+		window_z[i] = pow(1.0/gsl_sf_sinc(ii/((double)nz)),this->get_window_order());
+    }
+#pragma omp parallel for schedule(guided)
+        for(int i=0;i<nx;i++){
+                float wx = window_x[i];
+                for(int j=0;j<ny;j++){
+                        float wy = window_y[j];
+                        for(int k=0;k<nz/2;k++){
+                                float wz = window_z[k];
+                                int bin = (i*ny+j)*(2*(nz/2+1))+2*k;
+                                this->data[bin] *= wx*wy*wz;
+                                this->data[bin+1] *= wx*wy*wz;
+                        }
+                }
+        }
+}
